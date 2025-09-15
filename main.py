@@ -171,4 +171,19 @@ def main():
         df_all = df_all.dropna(subset=["URL"]).drop_duplicates(subset=["URL"], keep="last")
         # 投稿日で降順（変換できない値は末尾）
         try:
-            dt = pd.to_datetime(df_all["投稿日"], errors="coerce", format="%Y/
+            dt = pd.to_datetime(df_all["投稿日"], errors="coerce", format="%Y/%m/%d %H:%M")
+            df_all = df_all.assign(_dt=dt).sort_values("_dt", ascending=False).drop(columns=["_dt"])
+        except Exception:
+            pass
+
+    # 3) 保存（単一シート news）
+    os.makedirs("output", exist_ok=True)
+    out_path = os.path.join("output", monthly_excel_name())
+    with pd.ExcelWriter(out_path, engine="openpyxl") as w:
+        df_all.to_excel(w, index=False, sheet_name="news")
+
+    print(f"✅ Excel出力: {out_path}（合計 {len(df_all)} 件、うち新規 {len(df_new)} 件）")
+
+
+if __name__ == "__main__":
+    main()
