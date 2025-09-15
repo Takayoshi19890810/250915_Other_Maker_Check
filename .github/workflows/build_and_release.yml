@@ -3,7 +3,7 @@ name: Build & Release Yahoo News (latest, single file)
 on:
   workflow_dispatch: {}
   schedule:
-    - cron: "0 6 * * *"  # JST 15:00
+    - cron: "0 * * * *"  # 毎時00分（UTC）= JSTでも毎時00分に実行
 
 permissions:
   contents: write
@@ -37,7 +37,8 @@ jobs:
 
       - name: Run scraper (append to single Excel)
         env:
-          NEWS_KEYWORD: ${{ vars.NEWS_KEYWORD }}   # 未設定なら main.py の既定 "ホンダ"
+          # 複数キーワードは NEWS_KEYWORDS に "ホンダ,トヨタ,マツダ,スバル,ダイハツ,スズキ,三菱自動車"
+          NEWS_KEYWORDS: ${{ vars.NEWS_KEYWORDS }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           CHROME_PATH: ${{ steps.chrome.outputs.CHROME_PATH }}
@@ -58,4 +59,4 @@ jobs:
           file: output/yahoo_news.xlsx
           asset_name: yahoo_news.xlsx
           overwrite: true
-          body: "Single persistent Excel file. Appends new rows to 'news' sheet (dedup by URL, keep=first). AutoFilter enabled on header."
+          body: "Single persistent Excel file. Appends new rows to each keyword sheet (dedup by URL, keep=first). AutoFilter enabled on header."
