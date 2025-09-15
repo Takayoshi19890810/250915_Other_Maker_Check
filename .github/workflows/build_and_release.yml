@@ -1,0 +1,68 @@
+name: Build & Release Yahoo News Excel
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    # 毎日 15:00 JST（= UTC 06:00）
+    - cron: "0 6 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Chrome
+        uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: stable
+
+      - name: Show Chrome path
+        id: chrome
+        run: |
+          echo "CHROME_PATH=$(which chrome)" >> $GITHUB_OUTPUT
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run scraper (make / merge Excel)
+        env:
+          # 例：Actionsの「Variables」や「Secrets」で指定可
+          NEWS_KEYWORD: ${{ vars.NEWS_KEYWORD }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          CHROME_PATH: ${{ steps.chrome.outputs.CHROME_PATH }}
+        run: |
+          python main.py
+
+      - name: Compute monthly tag and asset
+        id: tag
+        run: |
+          ym=$(date -u -d "+9 hours" +"%Y-%m")
+          echo "YM=$ym" >> $GITHUB_OUTPUT
+          echo "TAG=news-$ym" >> $GITHUB_OUTPUT
+          echo "ASSET=yahoo_news_${ym}.xlsx" >> $GITHUB_OUTPUT
+
+      - name: Upload to monthly Release (overwrite)
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          tag: ${{ steps.tag.outputs.TAG }}
+          release_name: "Yahoo News ${{
+            steps.tag.outputs.YM }}"
+          file: output/${{ steps.tag.outputs.ASSET }}
+          asset_name: ${{ steps.tag.outputs.ASSET }}
+          overwrite: true
+          body: "Monthly accumulating Yahoo News Excel (appends new rows to 'news' sheet; dedup by URL)."
