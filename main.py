@@ -46,6 +46,39 @@ def make_driver() -> webdriver.Chrome:
     return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=opts)
 
 
+# ===== 便利: 引用元のクリーンアップ関数 =====
+# ・YYYY/MM/DD HH:MM も M/D H:MM も削除
+# ・半角/全角コロン、日付と時刻の間の空白有無にも対応
+# ・丸括弧の中身ごと除去（（9/15 8:50）等）
+# ・先頭の通し番号「2 Merkmal」→「Merkmal」
+DATE_RE = re.compile(
+    r"(?:\d{4}/\d{1,2}/\d{1,2}|\d{1,2}/\d{1,2})\s*\d{1,2}[:：]\d{2}"
+)
+
+def clean_source_text(text: str) -> str:
+    if not text:
+        return ""
+
+    t = text
+
+    # （）内を先に削除（全角/半角の丸括弧両対応）
+    t = re.sub(r"[（(][^）)]+[）)]", "", t)
+
+    # 日付 + 時刻（例: 2025/9/15 8:50, 9/15 8:50, 9/14 20：00）を削除
+    t = DATE_RE.sub("", t)
+
+    # 先頭の番号＋空白を削除（例: "2 Merkmal" → "Merkmal"）
+    t = re.sub(r"^\d+\s*", "", t)
+
+    # 複数空白を1つに
+    t = re.sub(r"\s{2,}", " ", t)
+
+    # 前後の空白を除去
+    t = t.strip()
+
+    return t
+
+
 # ===== Yahoo!ニュース検索 =====
 def format_dt(dt: datetime) -> str:
     return dt.strftime("%Y/%m/%d %H:%M")
@@ -88,7 +121,7 @@ def get_yahoo_news(keyword: str) -> pd.DataFrame:
                 except Exception:
                     pub_date = ds
 
-            # 引用元クリーンアップ
+            # 引用元（媒体＋カテゴリ）を抽出してクリーン
             source = ""
             for sel in [
                 "div.sc-n3vj8g-0.yoLqH div.sc-110wjhy-8.bsEjY span",
@@ -99,19 +132,11 @@ def get_yahoo_news(keyword: str) -> pd.DataFrame:
                 el = li.select_one(sel)
                 if not el:
                     continue
-                txt = el.get_text(" ", strip=True)
+                raw = el.get_text(" ", strip=True)
 
-                # 日付（YYYY/MM/DD HH:MM または M/D H:MM）を削除
-                txt = re.sub(r"\d{1,4}/\d{1,2}/\d{1,2}\s+\d{1,2}:\d{2}", "", txt)
-                txt = re.sub(r"\d{1,2}/\d{1,2}\s+\d{1,2}:\d{2}", "", txt)
+                # 一旦 2025/09/15 08:50 / 9/15 8:50 等を含む全体テキストをクリーン
+                txt = clean_source_text(raw)
 
-                # 丸括弧内を削除
-                txt = re.sub(r"\([^)]+\)", "", txt)
-
-                # 先頭の数字＋空白を削除（例: "2 Merkmal" → "Merkmal"）
-                txt = re.sub(r"^\d+\s*", "", txt)
-
-                txt = txt.strip()
                 if txt and not txt.isdigit():
                     source = txt
                     break
