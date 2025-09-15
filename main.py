@@ -53,7 +53,7 @@ def format_dt(dt: datetime) -> str:
 def get_yahoo_news(keyword: str) -> pd.DataFrame:
     """
     Yahoo!ニュース（検索）から タイトル/URL/投稿日/引用元 を取得
-    1ページ分（必要ならここにページ送り実装を足せます）
+    1ページ分（必要ならページ送り処理を追加可能）
     """
     driver = make_driver()
     url = (
@@ -88,7 +88,7 @@ def get_yahoo_news(keyword: str) -> pd.DataFrame:
                 except Exception:
                     pub_date = ds
 
-            # 媒体名推定
+            # 引用元クリーンアップ
             source = ""
             for sel in [
                 "div.sc-n3vj8g-0.yoLqH div.sc-110wjhy-8.bsEjY span",
@@ -100,8 +100,17 @@ def get_yahoo_news(keyword: str) -> pd.DataFrame:
                 if not el:
                     continue
                 txt = el.get_text(" ", strip=True)
-                txt = re.sub(r"\d{4}/\d{1,2}/\d{1,2} \d{2}:\d{2}", "", txt)
+
+                # 日付（YYYY/MM/DD HH:MM または M/D H:MM）を削除
+                txt = re.sub(r"\d{1,4}/\d{1,2}/\d{1,2}\s+\d{1,2}:\d{2}", "", txt)
+                txt = re.sub(r"\d{1,2}/\d{1,2}\s+\d{1,2}:\d{2}", "", txt)
+
+                # 丸括弧内を削除
                 txt = re.sub(r"\([^)]+\)", "", txt)
+
+                # 先頭の数字＋空白を削除（例: "2 Merkmal" → "Merkmal"）
+                txt = re.sub(r"^\d+\s*", "", txt)
+
                 txt = txt.strip()
                 if txt and not txt.isdigit():
                     source = txt
