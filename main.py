@@ -16,17 +16,35 @@ from selenium.webdriver.chrome.options import Options
 from webdriver_manager.chrome import ChromeDriverManager
 
 
-# ===== 共通ユーティリティ =====
+# ===== 設定 =====
+RELEASE_TAG = "news-latest"
+ASSET_NAME = "yahoo_news.xlsx"
+SHEET_NAMES = [
+    "ホンダ",
+    "トヨタ",
+    "マツダ",
+    "スバル",
+    "ダイハツ",
+    "スズキ",
+    "三菱自動車",
+]
+
+# 既定は上のリスト。環境変数 NEWS_KEYWORDS に「ホンダ,トヨタ,…」と入れたら上書き可能
+def get_keywords() -> list[str]:
+    env = os.getenv("NEWS_KEYWORDS")
+    if env:
+        # カンマ区切り or 改行で分割
+        parts = [p.strip() for p in re.split(r"[,\n]", env) if p.strip()]
+        return parts or SHEET_NAMES
+    return SHEET_NAMES
+
+
+# ===== ユーティリティ =====
 def jst_now():
     return datetime.now(timezone(timedelta(hours=9)))
 
 def jst_str(fmt="%Y/%m/%d %H:%M"):
     return jst_now().strftime(fmt)
-
-DEFAULT_KEYWORD = "ホンダ"   # NEWS_KEYWORD 環境変数 or --keyword で上書き
-RELEASE_TAG = "news-latest"
-ASSET_NAME = "yahoo_news.xlsx"
-SHEET_NAME = "news"
 
 
 # ===== Chrome（headless） =====
@@ -53,17 +71,17 @@ def clean_source_text(text: str) -> str:
     if not text:
         return ""
     t = text
-    t = re.sub(r"[（(][^）)]+[）)]", "", t)      # （）内削除
-    t = DATE_RE.sub("", t)                       # 日付+時刻削除
-    t = re.sub(r"^\d+\s*", "", t)                # 先頭の番号＋空白
-    t = re.sub(r"\s{2,}", " ", t).strip()
+    t = re.sub(r"[（(][^）)]+[）)]", "", t)      # （）内を削除
+    t = DATE_RE.sub("", t)                       # 日付+時刻パターンを削除
+    t = re.sub(r"^\d+\s*", "", t)                # 先頭の通し番号（例: "2 Merkmal"）
+    t = re.sub(r"\s{2,}", " ", t).strip()        # 余分な空白整理
     return t
 
 
-# ===== Yahoo!ニュース検索 =====
-def get_yahoo_news(keyword: str) -> pd.DataFrame:
+# ===== Yahoo!ニュース検索（1ページ分） =====
+def scrape_yahoo(keyword: str) -> pd.DataFrame:
     """
-    Yahoo!ニュース（検索）から タイトル/URL/投稿日/引用元 を取得（1ページ）
+    指定キーワードでYahoo!ニュース（検索）から タイトル/URL/投稿日/引用元 を取得（1ページ）
     """
     driver = make_driver()
     url = (
@@ -88,7 +106,7 @@ def get_yahoo_news(keyword: str) -> pd.DataFrame:
             url = link_tag["href"] if link_tag else ""
             date_str = time_tag.get_text(strip=True) if time_tag else ""
 
-            # 投稿日：YYYY/MM/DD HH:MM に揃えられる場合は揃え、それ以外は原文
+            # 投稿日：フォーマットできれば "YYYY/MM/DD HH:MM" に正規化
             pub_date = "取得不可"
             if date_str:
                 ds = re.sub(r'\([月火水木金土日]\)', '', date_str).strip()
@@ -98,7 +116,7 @@ def get_yahoo_news(keyword: str) -> pd.DataFrame:
                 except Exception:
                     pub_date = ds
 
-            # 引用元（媒体＋カテゴリ）を抽出してクリーン
+            # 引用元（媒体＋カテゴリなど）を抽出してクリーン
             source = ""
             for sel in [
                 "div.sc-n3vj8g-0.yoLqH div.sc-110wjhy-8.bsEjY span",
@@ -121,8 +139,8 @@ def get_yahoo_news(keyword: str) -> pd.DataFrame:
                     "URL": url,
                     "投稿日": pub_date,
                     "引用元": source or "Yahoo",
-                    "取得日時": jst_str(),            # いつ取得したか（追記運用のため）
-                    "検索キーワード": keyword,        # 将来マルチキーワード時に役立つ
+                    "取得日時": jst_str(),      # 追記運用のため取得時刻も保持
+                    "検索キーワード": keyword,  # 念のため列としても持っておく
                 })
         except Exception:
             continue
@@ -130,101 +148,123 @@ def get_yahoo_news(keyword: str) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["タイトル", "URL", "投稿日", "引用元", "取得日時", "検索キーワード"])
 
 
-# ===== Releaseから既存Excelを取得 =====
-def download_existing_from_release(repo: str, tag: str, asset_name: str, token: str) -> pd.DataFrame:
-    """Release(tag)に存在すればExcelをDLしてDFで返す。無ければ空DF。"""
+# ===== Releaseから既存Excelを取得（全シート） =====
+def download_existing_book(repo: str, tag: str, asset_name: str, token: str) -> dict[str, pd.DataFrame]:
+    """
+    Release(tag)の既存Excel全シートを読み出して {sheet_name: df} で返す。
+    見つからなければ、指定シート名それぞれ空DFで返す。
+    """
+    # 初期値（指定の全シート分、空DF）
+    empty_cols = ["タイトル", "URL", "投稿日", "引用元", "取得日時", "検索キーワード"]
+    dfs: dict[str, pd.DataFrame] = {sn: pd.DataFrame(columns=empty_cols) for sn in SHEET_NAMES}
+
     if not (repo and tag and token):
-        return pd.DataFrame(columns=["タイトル", "URL", "投稿日", "引用元", "取得日時", "検索キーワード"])
+        return dfs
 
     base = "https://api.github.com"
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
 
     r = requests.get(f"{base}/repos/{repo}/releases/tags/{tag}", headers=headers)
     if r.status_code != 200:
-        return pd.DataFrame(columns=["タイトル", "URL", "投稿日", "引用元", "取得日時", "検索キーワード"])
+        return dfs
     rel = r.json()
 
     asset = next((a for a in rel.get("assets", []) if a.get("name") == asset_name), None)
     if not asset:
-        return pd.DataFrame(columns=["タイトル", "URL", "投稿日", "引用元", "取得日時", "検索キーワード"])
+        return dfs
 
     headers_dl = headers | {"Accept": "application/octet-stream"}
     dr = requests.get(asset["url"], headers_dl)
     if dr.status_code != 200:
-        return pd.DataFrame(columns=["タイトル", "URL", "投稿日", "引用元", "取得日時", "検索キーワード"])
+        return dfs
 
     with io.BytesIO(dr.content) as bio:
         try:
-            df = pd.read_excel(bio, sheet_name=SHEET_NAME)
-            return df[["タイトル", "URL", "投稿日", "引用元", "取得日時", "検索キーワード"]].copy()
+            book = pd.read_excel(bio, sheet_name=None)
         except Exception:
-            return pd.DataFrame(columns=["タイトル", "URL", "投稿日", "引用元", "取得日時", "検索キーワード"])
+            return dfs
+
+    for sn in SHEET_NAMES:
+        if sn in book:
+            df = book[sn]
+            # 欠けている列があれば補完（将来の列追加にも耐性）
+            for col in empty_cols:
+                if col not in df.columns:
+                    df[col] = ""
+            dfs[sn] = df[empty_cols].copy()
+
+    return dfs
 
 
-# ===== 保存（オートフィルター/列幅/フリーズ対応） =====
-def save_with_format(df: pd.DataFrame, path: str):
+# ===== 保存：各シートに書き込み＆オートフィルター／列幅／フリーズ =====
+def save_book_with_format(dfs_by_sheet: dict[str, pd.DataFrame], path: str):
     from openpyxl.utils import get_column_letter
     from openpyxl.styles import Font, Alignment
+
     with pd.ExcelWriter(path, engine="openpyxl") as w:
-        df.to_excel(w, index=False, sheet_name=SHEET_NAME)
-        ws = w.book[SHEET_NAME]
+        for sn, df in dfs_by_sheet.items():
+            df.to_excel(w, index=False, sheet_name=sn)
+            ws = w.book[sn]
 
-        # オートフィルター（ヘッダーに並べ替え・フィルターのボタン）
-        max_col = ws.max_column
-        max_row = ws.max_row
-        ws.auto_filter.ref = f"A1:{get_column_letter(max_col)}{max_row}"
+            # オートフィルター（ヘッダー行に並べ替え・フィルタのボタン）
+            max_col = ws.max_column
+            max_row = ws.max_row
+            ws.auto_filter.ref = f"A1:{get_column_letter(max_col)}{max_row}"
 
-        # ヘッダー太字＆中央寄せ
-        header_font = Font(bold=True)
-        for cell in ws[1]:
-            cell.font = header_font
-            cell.alignment = Alignment(vertical="center")
+            # ヘッダー太字
+            header_font = Font(bold=True)
+            for cell in ws[1]:
+                cell.font = header_font
+                cell.alignment = Alignment(vertical="center")
 
-        # 列幅の軽調整
-        widths = {
-            "A": 50,  # タイトル
-            "B": 60,  # URL
-            "C": 16,  # 投稿日
-            "D": 24,  # 引用元
-            "E": 16,  # 取得日時
-            "F": 16,  # 検索キーワード
-        }
-        for col, wdt in widths.items():
-            if ws.max_column >= ord(col) - 64:
-                ws.column_dimensions[col].width = wdt
+            # 列幅（軽調整）
+            widths = {
+                "A": 50,  # タイトル
+                "B": 60,  # URL
+                "C": 16,  # 投稿日
+                "D": 24,  # 引用元
+                "E": 16,  # 取得日時
+                "F": 16,  # 検索キーワード
+            }
+            for col, wdt in widths.items():
+                if ws.max_column >= ord(col) - 64:
+                    ws.column_dimensions[col].width = wdt
 
-        # ヘッダー固定（1行目）
-        ws.freeze_panes = "A2"
+            # 1行目固定
+            ws.freeze_panes = "A2"
 
 
 # ===== メイン =====
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--keyword", type=str, default=None, help="検索キーワード（未指定なら環境変数NEWS_KEYWORD、なければホンダ）")
-    args = ap.parse_args()
+    # キーワードは環境変数NEWS_KEYWORDSで上書き可能（例: "ホンダ,トヨタ,..."）
+    keywords = get_keywords()
+    print(f"🔎 キーワード一覧: {', '.join(keywords)}")
 
-    keyword = args.keyword or os.getenv("NEWS_KEYWORD") or DEFAULT_KEYWORD
-    print(f"🔎 キーワード: {keyword}")
-
-    # 1) 最新取得
-    df_new = get_yahoo_news(keyword)
-
-    # 2) 既存（固定Release資産）とマージ（既存優先＝新規は末尾に付く）
+    # 1) 既存ブック取得（固定Releaseから）
     token = os.getenv("GITHUB_TOKEN", "")
     repo = os.getenv("GITHUB_REPOSITORY", "")
-    df_old = download_existing_from_release(repo, RELEASE_TAG, ASSET_NAME, token)
+    dfs_old = download_existing_book(repo, RELEASE_TAG, ASSET_NAME, token)
 
-    df_all = pd.concat([df_old, df_new], ignore_index=True)
-    if not df_all.empty:
-        df_all = df_all.dropna(subset=["URL"]).drop_duplicates(subset=["URL"], keep="first")
-        # 並べ替えはしない：既存の順序を保持し、新規は末尾に追記される
+    # 2) 新規スクレイプ → シートごとにマージ（URLで重複排除、既存優先＝新規は末尾）
+    dfs_merged: dict[str, pd.DataFrame] = {}
+    for kw in keywords:
+        df_old = dfs_old.get(kw, pd.DataFrame(columns=["タイトル", "URL", "投稿日", "引用元", "取得日時", "検索キーワード"]))
+        df_new = scrape_yahoo(kw)
 
-    # 3) 保存（単一シート news, オートフィルター付き）
+        df_all = pd.concat([df_old, df_new], ignore_index=True)
+        if not df_all.empty:
+            df_all = df_all.dropna(subset=["URL"]).drop_duplicates(subset=["URL"], keep="first")
+            # 並べ替えはしない：既存の並びを維持し、新規は末尾に付く
+        dfs_merged[kw] = df_all
+
+        print(f"  - {kw}: 既存 {len(df_old)} 件 + 新規 {len(df_new)} 件 → 合計 {len(df_all)} 件")
+
+    # 3) 保存（各シートに出力、ヘッダにフィルター／フリーズ等）
     os.makedirs("output", exist_ok=True)
     out_path = os.path.join("output", ASSET_NAME)
-    save_with_format(df_all, out_path)
+    save_book_with_format(dfs_merged, out_path)
 
-    print(f"✅ Excel出力: {out_path}（合計 {len(df_all)} 件、うち新規 {len(df_new)} 件）")
+    print(f"✅ Excel出力: {out_path}")
     print(f"🔗 固定DL: https://github.com/<OWNER>/<REPO>/releases/download/{RELEASE_TAG}/{ASSET_NAME}")
 
 
