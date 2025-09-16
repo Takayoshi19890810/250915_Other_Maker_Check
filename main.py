@@ -44,6 +44,7 @@ def jst_now():
 
 
 def jst_str(fmt="%Y/%m/%d %H:%M"):
+    """Returns the current JST as a formatted string."""
     return jst_now().strftime(fmt)
 
 
@@ -116,8 +117,13 @@ def scrape_yahoo(keyword: str) -> pd.DataFrame:
                 try:
                     dt = datetime.strptime(ds, "%Y/%m/%d %H:%M")
                     pub_date = dt.strftime("%Y/%m/%d %H:%M")
-                except Exception:
-                    pub_date = ds
+                except ValueError:
+                    try:
+                        year = jst_now().year
+                        dt = datetime.strptime(f"{year}/{ds}", "%Y/%m/%d %H:%M")
+                        pub_date = dt.strftime("%Y/%m/%d %H:%M")
+                    except ValueError:
+                        pub_date = ds
 
             # 引用元（媒体＋カテゴリなど）を抽出してクリーン
             source = ""
