@@ -42,6 +42,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           CHROME_PATH: ${{ steps.chrome.outputs.CHROME_PATH }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}  # APIキーを環境変数として設定
         run: python main.py
 
       - name: List outputs (debug)
@@ -59,4 +60,6 @@ jobs:
           file: output/yahoo_news.xlsx
           asset_name: yahoo_news.xlsx
           overwrite: true
-          body: "Single persistent Excel file. Appends new rows to each keyword sheet (dedup by URL, keep=first). AutoFilter enabled on header."
+          body: |
+            Yahoo News scraper results.
+            Updated at `{{DATE}} {{TIME}}` (JST).
