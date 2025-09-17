@@ -5,5 +5,5 @@ requests
 openpyxl
 pandas
 google-generativeai
-jaconv  # 半角統一をより正確に行うためのライブラリ
-regex   # 重複確認用タイトルの正規化を改善するためのライブラリ
+jaconv
+regex
