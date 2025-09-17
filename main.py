@@ -324,28 +324,36 @@ def classify_with_gemini(dfs: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame
             batch = df_to_classify.iloc[start:start + batch_size]
             payload = [{"row": i, "title": t} for i, t in batch.loc[:, ["タイトル"]].itertuples(index=True)]
 
-            try:
-                prompt = system_prompt + "\n\n" + json.dumps(payload, ensure_ascii=False, indent=2)
-                resp = model.generate_content(prompt)
-                text = (resp.text or "").strip()
+            retries = 3
+            for attempt in range(retries):
+                try:
+                    prompt = system_prompt + "\n\n" + json.dumps(payload, ensure_ascii=False, indent=2)
+                    resp = model.generate_content(prompt)
+                    text = (resp.text or "").strip()
 
-                import regex as re_u
-                m = re_u.search(r'(\\[.*\\].*})', text, flags=re_u.DOTALL)
-                json_text = m.group(1) if m else text
-                result = json.loads(json_text)
+                    import regex as re_u
+                    m = re_u.search(r'(\\[.*\\].*})', text, flags=re_u.DOTALL)
+                    json_text = m.group(1) if m else text
+                    result = json.loads(json_text)
 
-                for obj in result:
-                    try:
-                        idx = int(obj.get("row"))
-                        sentiment = str(obj.get("sentiment", "")).strip()
-                        category = str(obj.get("category", "")).strip()
-                        if sentiment and category:
-                            df.loc[df_to_classify.index[idx], "ポジネガ"] = sentiment
-                            df.loc[df_to_classify.index[idx], "カテゴリ"] = category
-                    except Exception as e:
-                        print(f"⚠ Gemini応答の解析に失敗: {e}")
-            except Exception as e:
-                print(f"⚠ Gemini API呼び出しに失敗: {e}")
+                    for obj in result:
+                        try:
+                            idx = int(obj.get("row"))
+                            sentiment = str(obj.get("sentiment", "")).strip()
+                            category = str(obj.get("category", "")).strip()
+                            if sentiment and category:
+                                df.loc[df_to_classify.index[idx], "ポジネガ"] = sentiment
+                                df.loc[df_to_classify.index[idx], "カテゴリ"] = category
+                        except Exception as e:
+                            print(f"⚠ Gemini応答の解析に失敗: {e}")
+                    # 成功した場合はループを抜ける
+                    break
+                except Exception as e:
+                    print(f"⚠ Gemini API呼び出しに失敗: {e} (再試行 {attempt + 1}/{retries})")
+                    time.sleep(5)  # 5秒待機してから再試行
+            else:
+                # 3回再試行しても失敗した場合
+                print(f"❌ {sheet_name}: {batch_size}件の分類に失敗しました。")
                 
         classified_dfs[sheet_name] = df
     return classified_dfs
