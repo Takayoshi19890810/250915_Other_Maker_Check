@@ -6,13 +6,29 @@ import time
 from datetime import datetime, timezone, timedelta
 
 import pandas as pd
-import requests
 from bs4 import BeautifulSoup
+import requests
 
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from webdriver_manager.chrome import ChromeDriverManager
+
+
+# 高精度なUnicode正規表現（任意）
+try:
+    import regex as re_u  # pip install regex
+except Exception:
+    re_u = None
+
+
+# 半角統一用
+import unicodedata
+try:
+    import jaconv  # pip install jaconv
+except Exception:
+    jaconv = None
+
 
 # ===== 設定 =====
 RELEASE_TAG = "news-latest"
@@ -33,7 +49,7 @@ def get_keywords() -> list[str]:
     env = os.getenv("NEWS_KEYWORDS")
     if env:
         # カンマ区切り or 改行で分割
-        parts = [p.strip() for p in re.split(r"[,\n]", env) if p.strip()]
+        parts = [p.strip() for p in re.split(r"[,\\n]", env) if p.strip()]
         return parts or SHEET_NAMES
     return SHEET_NAMES
 
@@ -46,6 +62,57 @@ def jst_now():
 def jst_str(fmt="%Y/%m/%d %H:%M"):
     """Returns the current JST as a formatted string."""
     return jst_now().strftime(fmt)
+
+
+# --- 文字種の半角統一（カタカナ・数字・英字） ---
+def to_hankaku_kana_ascii_digit(s: str) -> str:
+    """
+    ・数字/英字は NFKC で全角→半角へ
+    ・カタカナは jaconv があれば z2h(kana=True) で半角化
+    （なければ長音等は残るが、実害を最小化）
+    """
+    if not s:
+        return ""
+    # 数字・英字は NFKC で半角化（全角→ASCII）
+    s_nfkc = unicodedata.normalize("NFKC", s)
+
+    # カタカナ半角化（可能なら）
+    if jaconv is not None:
+        # ascii/digit も True にして安全側で全半角混在を解消
+        s_nfkc = jaconv.z2h(s_nfkc, kana=True, digit=True, ascii=True)
+    return s_nfkc
+
+
+def normalize_title_for_dup(s: str) -> str:
+    """
+    I列（重複確認用）生成：
+    1) カタカナ・数字・アルファベットを半角へ統一
+    2) 記号・括弧類・空白類を包括除去（ただし【】は残す）
+    3) 余分な区切りを除いて比較用のシンプル文字列を出力
+    """
+    if not s:
+        return ""
+
+    # 1) 半角統一
+    s = to_hankaku_kana_ascii_digit(s)
+
+    # 2) 記号類の除去（【】は残す）
+    if re_u:
+        # \p{P}=句読点, \p{S}=記号, \p{Z}=区切り（スペース等）, \p{Cc}=制御
+        # ただし 【】 は除外
+        s = re_u.sub(r'[\p{P}\p{S}\p{Z}\p{Cc}&&[^【】]]+', '', s)
+    else:
+        import re
+        dash_chars = r'\-\u2212\u2010\u2011\u2012\u2013\u2014\u2015\uFF0D\u30FC\uFF70'
+        pattern = (
+            r'[\s"\'\u201C\u201D\u2018\u2019\(\)\[\]{}<>]'  # 空白と各種引用符・半角括弧
+            r'|[、。・,…:;!?！？／/\\|＋+＊*.,]'              # 句読点・記号
+            r'|[＜＞「」『』《》〔〕［］｛｝（）]'         # 全角括弧（【】は除外）
+            r'|[' + dash_chars + r']'                      # ハイフン・ダッシュ・長音
+        )
+        s = re.sub(pattern, "", s)
+
+    return s
 
 
 # ===== Chrome（headless） =====
@@ -113,7 +180,7 @@ def scrape_yahoo(keyword: str) -> pd.DataFrame:
             # 投稿日：フォーマットできれば "YYYY/MM/DD HH:MM" に正規化
             pub_date = "取得不可"
             if date_str:
-                ds = re.sub(r'\([月火水木金土日]\)', '', date_str).strip()
+                ds = re.sub(r'\\([月火水木金土日]\\)', '', date_str).strip()
                 try:
                     dt = datetime.strptime(ds, "%Y/%m/%d %H:%M")
                     pub_date = dt.strftime("%Y/%m/%d %H:%M")
@@ -141,6 +208,9 @@ def scrape_yahoo(keyword: str) -> pd.DataFrame:
                 if txt and not txt.isdigit():
                     source = txt
                     break
+            
+            # 重複確認用タイトル
+            normalized_title = normalize_title_for_dup(title)
 
             if title and url:
                 rows.append(
@@ -151,12 +221,16 @@ def scrape_yahoo(keyword: str) -> pd.DataFrame:
                         "引用元": source or "Yahoo",
                         "取得日時": jst_str(),       # 追記運用のため取得時刻も保持
                         "検索キーワード": keyword,   # 念のため列としても持っておく
+                        # 追加した列
+                        "ポジネガ": "",
+                        "カテゴリ": "",
+                        "重複確認用タイトル": normalized_title,
                     }
                 )
         except Exception:
             continue
 
-    return pd.DataFrame(rows, columns=["タイトル", "URL", "投稿日", "引用元", "取得日時", "検索キーワード"])
+    return pd.DataFrame(rows, columns=["タイトル", "URL", "投稿日", "引用元", "取得日時", "検索キーワード", "ポジネガ", "カテゴリ", "重複確認用タイトル"])
 
 
 # ===== Releaseから既存Excelを取得（全シート） =====
@@ -166,7 +240,7 @@ def download_existing_book(repo: str, tag: str, asset_name: str, token: str) -> 
     見つからなければ、指定シート名それぞれ空DFで返す。
     """
     # 初期値（指定の全シート分、空DF）
-    empty_cols = ["タイトル", "URL", "投稿日", "引用元", "取得日時", "検索キーワード"]
+    empty_cols = ["タイトル", "URL", "投稿日", "引用元", "取得日時", "検索キーワード", "ポジネガ", "カテゴリ", "重複確認用タイトル"]
     dfs: dict[str, pd.DataFrame] = {sn: pd.DataFrame(columns=empty_cols) for sn in SHEET_NAMES}
 
     if not (repo and tag):
@@ -243,7 +317,7 @@ def save_book_with_format(dfs: dict[str, pd.DataFrame], path: str):
     for sheet_name, df in dfs.items():
         ws = wb.create_sheet(title=sheet_name)
         # ヘッダー
-        headers = ["タイトル", "URL", "投稿日", "引用元", "取得日時", "検索キーワード"]
+        headers = ["タイトル", "URL", "投稿日", "引用元", "取得日時", "検索キーワード", "ポジネガ", "カテゴリ", "重複確認用タイトル"]
         ws.append(headers)
         
         # データ（日付変換もここで実施）
@@ -281,6 +355,9 @@ def save_book_with_format(dfs: dict[str, pd.DataFrame], path: str):
             "D": 24,  # 引用元
             "E": 16,  # 取得日時
             "F": 16,  # 検索キーワード
+            "G": 16,  # ポジネガ
+            "H": 16,  # カテゴリ
+            "I": 16,  # 重複確認用タイトル
         }
         for col, wdt in widths.items():
             if ws.max_column >= ord(col) - 64:
@@ -315,7 +392,7 @@ def main():
     # 2) 新規スクレイプ → シートごとにマージ（URLで重複排除、既存優先＝新規は末尾）
     dfs_merged: dict[str, pd.DataFrame] = {}
     for kw in keywords:
-        df_old = dfs_old.get(kw, pd.DataFrame(columns=["タイトル", "URL", "投稿日", "引用元", "取得日時", "検索キーワード"]))
+        df_old = dfs_old.get(kw, pd.DataFrame(columns=["タイトル", "URL", "投稿日", "引用元", "取得日時", "検索キーワード", "ポジネガ", "カテゴリ", "重複確認用タイトル"]))
         df_new = scrape_yahoo(kw)
 
         # 日付列のデータ型を文字列に統一してから結合
