@@ -3,32 +3,29 @@ import os
 import re
 import io
 import time
+import json
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
+import unicodedata
 
 import pandas as pd
-from bs4 import BeautifulSoup
 import requests
+from bs4 import BeautifulSoup
 
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from webdriver_manager.chrome import ChromeDriverManager
 
-
-# 高精度なUnicode正規表現（任意）
 try:
-    import regex as re_u  # pip install regex
+    import google.generativeai as genai
 except Exception:
-    re_u = None
+    genai = None
 
-
-# 半角統一用
-import unicodedata
 try:
-    import jaconv  # pip install jaconv
+    import jaconv # pip install jaconv
 except Exception:
     jaconv = None
-
 
 # ===== 設定 =====
 RELEASE_TAG = "news-latest"
@@ -97,20 +94,15 @@ def normalize_title_for_dup(s: str) -> str:
     s = to_hankaku_kana_ascii_digit(s)
 
     # 2) 記号類の除去（【】は残す）
-    if re_u:
-        # \p{P}=句読点, \p{S}=記号, \p{Z}=区切り（スペース等）, \p{Cc}=制御
-        # ただし 【】 は除外
-        s = re_u.sub(r'[\p{P}\p{S}\p{Z}\p{Cc}&&[^【】]]+', '', s)
-    else:
-        import re
-        dash_chars = r'\-\u2212\u2010\u2011\u2012\u2013\u2014\u2015\uFF0D\u30FC\uFF70'
-        pattern = (
-            r'[\s"\'\u201C\u201D\u2018\u2019\(\)\[\]{}<>]'  # 空白と各種引用符・半角括弧
-            r'|[、。・,…:;!?！？／/\\|＋+＊*.,]'              # 句読点・記号
-            r'|[＜＞「」『』《》〔〕［］｛｝（）]'         # 全角括弧（【】は除外）
-            r'|[' + dash_chars + r']'                      # ハイフン・ダッシュ・長音
-        )
-        s = re.sub(pattern, "", s)
+    import re
+    dash_chars = r'\\-\\u2212\\u2010\\u2011\\u2012\\u2013\\u2014\\u2015\\uFF0D\\u30FC\\uFF70'
+    pattern = (
+        r'[\\s"\'\\u201C\\u201D\\u2018\\u2019\\(\\)[\\]{}<>]'  # 空白と各種引用符・半角括弧
+        r'|[、。・,…:;!?！？／/\\\\|＋+＊*.,]'              # 句読点・記号
+        r'|[＜＞「」『』《》〔〕［］｛｝（）]'         # 全角括弧（【】は除外）
+        r'|[' + dash_chars + r']'                      # ハイフン・ダッシュ・長音
+    )
+    s = re.sub(pattern, "", s)
 
     return s
 
@@ -134,7 +126,7 @@ def make_driver() -> webdriver.Chrome:
 
 
 # ===== 引用元のクリーンアップ =====
-DATE_RE = re.compile(r"(?:\d{4}/\d{1,2}/\d{1,2}|\d{1,2}/\d{1,2})\s*\d{1,2}[:：]\d{2}")
+DATE_RE = re.compile(r"(?:\\d{4}/\\d{1,2}/\\d{1,2}|\\d{1,2}/\\d{1,2})\\s*\\d{1,2}[:：]\\d{2}")
 
 
 def clean_source_text(text: str) -> str:
@@ -208,7 +200,7 @@ def scrape_yahoo(keyword: str) -> pd.DataFrame:
                 if txt and not txt.isdigit():
                     source = txt
                     break
-            
+
             # 重複確認用タイトル
             normalized_title = normalize_title_for_dup(title)
 
@@ -307,7 +299,6 @@ def save_book_with_format(dfs: dict[str, pd.DataFrame], path: str):
     from openpyxl import Workbook
     from openpyxl.utils import get_column_letter
     from openpyxl.styles import Font, Alignment, numbers
-    from openpyxl.styles.numbers import BUILTIN_FORMATS
 
     wb = Workbook()
     # 既定で作られる最初のシートを削除
@@ -378,6 +369,97 @@ def save_book_with_format(dfs: dict[str, pd.DataFrame], path: str):
     wb.save(path)
 
 
+def classify_with_gemini(dfs: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
+    """
+    データフレームをシートごとに処理し、ポジネガとカテゴリをGeminiで分類する
+    """
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    if not api_key or genai is None:
+        print("ℹ Gemini分類はスキップ（APIキー未設定 or ライブラリ未インストール）。")
+        return dfs
+
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel("gemini-1.5-flash")
+    
+    # ====== Geminiへのプロンプト設定 ======
+    system_prompt = """
+あなたは敏腕雑誌記者です。Webニュースのタイトルを以下の規則で厳密に分類してください。
+
+【1】ポジネガ判定（必ず次のいずれか一語のみ）：
+- ポジティブ
+- ネガティブ
+- ニュートラル
+
+【2】記事のカテゴリー判定（最も関連が高い1つだけを選んで出力。並記禁止）：
+- 会社：企業の施策や生産、販売台数など。ニッサン、トヨタ、ホンダ、スバル、マツダ、スズキ、ミツビシ、ダイハツの記事の場合は () 付きで企業名を記載。それ以外は「その他」。
+- 車：クルマの名称が含まれているもの（会社名だけの場合は車に分類しない）。新型/現行/旧型 + 名称 を () 付きで記載（例：新型リーフ、現行セレナ、旧型スカイライン）。日産以外の車の場合は「車（競合）」と記載。
+- 技術（EV）：電気自動車の技術に関わるもの（ただしバッテリー工場建設や企業の施策は含まない）。
+- 技術（e-POWER）：e-POWERに関わるもの。
+- 技術（e-4ORCE）：4WDや2WD、AWDに関わるもの。
+- 技術（AD/ADAS）：自動運転や先進運転システムに関わるもの。
+- 技術：上記以外の技術に関わるもの。
+- モータースポーツ：F1やラリー、フォーミュラEなど、自動車レースに関わるもの。
+- 株式：株式発行や株価の値動き、投資に関わるもの。
+- 政治・経済：政治家や選挙、税金、経済に関わるもの。
+- スポーツ：野球やサッカー、バレーボールなど自動車以外のスポーツに関わるもの。
+- その他：上記に含まれないもの。
+
+【出力要件】
+- **JSON配列**のみを返してください（余計な文章や注釈は出力しない）。
+- 各要素は次の形式：{"row": 行番号, "sentiment": "ポジティブ|ネガティブ|ニュートラル", "category": "カテゴリ名"}
+- 入力の「タイトル」文字列は一切変更しないこと（出力には含めなくて良い）。
+""".strip()
+    # =====================================
+
+    classified_dfs = {}
+    for sheet_name, df in dfs.items():
+        # ポジネガまたはカテゴリが空欄の行を抽出
+        df_to_classify = df[(df["ポジネガ"] == "") | (df["カテゴリ"] == "")]
+
+        if df_to_classify.empty:
+            print(f"ℹ {sheet_name}: 分類対象の行はありません。")
+            classified_dfs[sheet_name] = df
+            continue
+
+        print(f"✨ {sheet_name}: {len(df_to_classify)}件をGeminiで分類します。")
+
+        # インデックスをリセットして、0からの連番を付与
+        df_to_classify = df_to_classify.reset_index(drop=True)
+
+        batch_size = 40
+        for start in range(0, len(df_to_classify), batch_size):
+            batch = df_to_classify.iloc[start:start + batch_size]
+            payload = [{"row": i, "title": t} for i, t in batch.loc[:, ["タイトル"]].itertuples(index=True)]
+
+            try:
+                prompt = system_prompt + "\n\n" + json.dumps(payload, ensure_ascii=False, indent=2)
+                resp = model.generate_content(prompt)
+                text = (resp.text or "").strip()
+
+                import re as re_std
+                m = re_std.search(r"\[.*\]", text, flags=re_std.DOTALL)
+                json_text = m.group(0) if m else text
+                result = json.loads(json_text)
+
+                for obj in result:
+                    try:
+                        idx = int(obj.get("row"))
+                        sentiment = str(obj.get("sentiment", "")).strip()
+                        category = str(obj.get("category", "")).strip()
+
+                        if sentiment and category:
+                            df.loc[df_to_classify.index[idx], "ポジネガ"] = sentiment
+                            df.loc[df_to_classify.index[idx], "カテゴリ"] = category
+                    except Exception as e:
+                        print(f"⚠ Gemini応答の解析に失敗: {e}")
+            except Exception as e:
+                print(f"⚠ Gemini API呼び出しに失敗: {e}")
+
+        classified_dfs[sheet_name] = df
+    
+    return classified_dfs
+
+
 # ===== メイン =====
 def main():
     # キーワードは環境変数NEWS_KEYWORDSで上書き可能（例: "ホンダ,トヨタ,..."）
@@ -407,10 +489,13 @@ def main():
 
         print(f"  - {kw}: 既存 {len(df_old)} 件 + 新規 {len(df_new)} 件 → 合計 {len(df_all)} 件")
 
-    # 3) 保存（各シートに出力、ヘッダにフィルター／フリーズ等）
+    # 3) Geminiでポジネガ/カテゴリを分類
+    dfs_classified = classify_with_gemini(dfs_merged)
+
+    # 4) 保存（各シートに出力、ヘッダにフィルター／フリーズ等）
     os.makedirs("output", exist_ok=True)
     out_path = os.path.join("output", ASSET_NAME)
-    save_book_with_format(dfs_merged, out_path)
+    save_book_with_format(dfs_classified, out_path)
 
     print(f"✅ Excel出力: {out_path}")
     # 固定DLリンク（実リポジトリ名が分かれば整形）
