@@ -4,3 +4,4 @@ webdriver-manager
 requests
 openpyxl
 pandas
+google-generativeai
