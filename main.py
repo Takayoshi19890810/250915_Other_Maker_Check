@@ -330,8 +330,8 @@ def classify_with_gemini(dfs: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame
                 text = (resp.text or "").strip()
 
                 import regex as re_u
-                m = re_u.search(r'\[.*\]', text, flags=re_u.DOTALL)
-                json_text = m.group(0) if m else text
+                m = re_u.search(r'(\\[.*\\].*})', text, flags=re_u.DOTALL)
+                json_text = m.group(1) if m else text
                 result = json.loads(json_text)
 
                 for obj in result:
@@ -346,7 +346,7 @@ def classify_with_gemini(dfs: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame
                         print(f"⚠ Gemini応答の解析に失敗: {e}")
             except Exception as e:
                 print(f"⚠ Gemini API呼び出しに失敗: {e}")
-
+                
         classified_dfs[sheet_name] = df
     return classified_dfs
 
@@ -362,6 +362,10 @@ def main():
     for kw in keywords:
         df_old = dfs_old.get(kw, pd.DataFrame(columns=["タイトル", "URL", "投稿日", "引用元", "取得日時", "検索キーワード", "ポジネガ", "カテゴリ", "重複確認用タイトル"]))
         df_new = scrape_yahoo(kw)
+
+        # 既存データと新規データの重複確認用タイトルを再生成
+        df_old["重複確認用タイトル"] = df_old["タイトル"].apply(normalize_title_for_dup)
+        df_new["重複確認用タイトル"] = df_new["タイトル"].apply(normalize_title_for_dup)
 
         df_old['投稿日'] = df_old['投稿日'].astype(str)
         df_new['投稿日'] = df_new['投稿日'].astype(str)
