@@ -222,7 +222,14 @@ def download_existing_book(repo: str, tag: str, asset_name: str, token: str) -> 
             for col in empty_cols:
                 if col not in df.columns:
                     df[col] = ""
-            dfs[sn] = df[empty_cols].copy()
+            df = df[empty_cols].copy()
+            
+            # 日付のフォーマットを統一
+            df['投稿日'] = pd.to_datetime(df['投稿日'], errors='coerce')
+            df['投稿日'] = df['投稿日'].dt.strftime('%Y/%m/%d %H:%M')
+            
+
+            dfs[sn] = df
 
     return dfs
 
@@ -231,7 +238,8 @@ def download_existing_book(repo: str, tag: str, asset_name: str, token: str) -> 
 def save_book_with_format(dfs: dict[str, pd.DataFrame], path: str):
     from openpyxl import Workbook
     from openpyxl.utils import get_column_letter
-    from openpyxl.styles import Font, Alignment
+    from openpyxl.styles import Font, Alignment, numbers
+    from openpyxl.styles.numbers import BUILTIN_FORMATS
 
     wb = Workbook()
     # 既定で作られる最初のシートを削除
@@ -274,6 +282,11 @@ def save_book_with_format(dfs: dict[str, pd.DataFrame], path: str):
 
         # 1行目固定
         ws.freeze_panes = "A2"
+
+        # 投稿日列の書式を yyyy/m/d h:mm に設定
+        for row in ws.iter_rows(min_row=2, min_col=3, max_col=3):
+            for cell in row:
+                cell.number_format = 'yyyy/m/d h:mm'
 
     # 出力
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
