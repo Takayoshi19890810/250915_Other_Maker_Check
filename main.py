@@ -209,7 +209,8 @@ def download_existing_book(repo: str, tag: str, asset_name: str, token: str) -> 
     # 4) Excel 読み込み
     with io.BytesIO(dr.content) as bio:
         try:
-            book = pd.read_excel(bio, sheet_name=None)
+            # dtype=str を指定することで、すべてのセルを文字列として読み込む
+            book = pd.read_excel(bio, sheet_name=None, dtype=str)
         except Exception as e:
             print(f"⚠️ 既存Excelの読み込みに失敗: {e}")
             return dfs
@@ -222,14 +223,7 @@ def download_existing_book(repo: str, tag: str, asset_name: str, token: str) -> 
             for col in empty_cols:
                 if col not in df.columns:
                     df[col] = ""
-            df = df[empty_cols].copy()
-            
-            # 日付のフォーマットを統一
-            df['投稿日'] = pd.to_datetime(df['投稿日'], errors='coerce')
-            df['投稿日'] = df['投稿日'].dt.strftime('%Y/%m/%d %H:%M')
-            
-
-            dfs[sn] = df
+            dfs[sn] = df[empty_cols].copy()
 
     return dfs
 
@@ -251,10 +245,22 @@ def save_book_with_format(dfs: dict[str, pd.DataFrame], path: str):
         # ヘッダー
         headers = ["タイトル", "URL", "投稿日", "引用元", "取得日時", "検索キーワード"]
         ws.append(headers)
-        # データ
+        
+        # データ（日付変換もここで実施）
         if not df.empty:
-            for row in df[headers].itertuples(index=False, name=None):
-                ws.append(list(row))
+            for row in df.itertuples(index=False):
+                new_row = list(row)
+                # '投稿日' 列の日付を変換
+                try:
+                    # '投稿日' の値が文字列で、かつ変換可能な場合のみdatetimeオブジェクトに変換
+                    if pd.notna(row.投稿日):
+                        dt_obj = pd.to_datetime(row.投稿日, errors='coerce')
+                        if not pd.isna(dt_obj):
+                            new_row[2] = dt_obj
+                except Exception:
+                    # 変換できない場合は元の値をそのまま使う
+                    pass
+                ws.append(new_row)
 
         # オートフィルター
         max_col = ws.max_column
@@ -284,9 +290,11 @@ def save_book_with_format(dfs: dict[str, pd.DataFrame], path: str):
         ws.freeze_panes = "A2"
 
         # 投稿日列の書式を yyyy/m/d h:mm に設定
+        # openpyxlで日付として認識されたセルにのみ適用
         for row in ws.iter_rows(min_row=2, min_col=3, max_col=3):
             for cell in row:
-                cell.number_format = 'yyyy/m/d h:mm'
+                if isinstance(cell.value, datetime):
+                    cell.number_format = 'yyyy/m/d h:mm'
 
     # 出力
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -310,6 +318,10 @@ def main():
         df_old = dfs_old.get(kw, pd.DataFrame(columns=["タイトル", "URL", "投稿日", "引用元", "取得日時", "検索キーワード"]))
         df_new = scrape_yahoo(kw)
 
+        # 日付列のデータ型を文字列に統一してから結合
+        df_old['投稿日'] = df_old['投稿日'].astype(str)
+        df_new['投稿日'] = df_new['投稿日'].astype(str)
+        
         df_all = pd.concat([df_old, df_new], ignore_index=True)
         if not df_all.empty:
             df_all = df_all.dropna(subset=["URL"]).drop_duplicates(subset=["URL"], keep="first")
