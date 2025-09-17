@@ -437,7 +437,7 @@ def classify_with_gemini(dfs: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame
                 text = (resp.text or "").strip()
 
                 import re as re_std
-                m = re_std.search(r"\[.*\]", text, flags=re_std.DOTALL)
+                m = re_std.search(r"\\[.*\\].*", text, flags=re_std.DOTALL)
                 json_text = m.group(0) if m else text
                 result = json.loads(json_text)
 
