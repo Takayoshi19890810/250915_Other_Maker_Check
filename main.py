@@ -81,6 +81,38 @@ def normalize_title_for_dup(s: str) -> str:
         s = re.sub(pattern, "", s)
     return s
 
+def normalize_date_str(date_str: str) -> str:
+    """様々な形式の日付文字列を 'YYYY/MM/DD HH:MM' に正規化する"""
+    if not isinstance(date_str, str) or not date_str.strip():
+        return ""
+
+    s = unicodedata.normalize("NFKC", date_str)
+    s = re.sub(r'\s*\([月火水木金土日]\)\s*', ' ', s).strip()
+
+    now = jst_now()
+    dt_obj = None
+
+    formats_to_try = [
+        "%Y/%m/%d %H:%M",
+        "%m/%d %H:%M"
+    ]
+
+    for fmt in formats_to_try:
+        try:
+            dt_obj = datetime.strptime(s, fmt)
+            if "%Y" not in fmt:
+                dt_obj = dt_obj.replace(year=now.year)
+                if dt_obj.replace(tzinfo=now.tzinfo) > now:
+                    dt_obj = dt_obj.replace(year=now.year - 1)
+            break
+        except (ValueError, TypeError):
+            continue
+
+    if dt_obj:
+        return dt_obj.strftime("%Y/%m/%d %H:%M")
+
+    return s # どの形式にも一致しない場合は元の文字列を返す
+
 def make_driver() -> webdriver.Chrome:
     opts = Options()
     chrome_path = os.getenv("CHROME_PATH")
@@ -129,19 +161,7 @@ def scrape_yahoo(keyword: str) -> pd.DataFrame:
             url = link_tag["href"] if link_tag else ""
             date_str = time_tag.get_text(strip=True) if time_tag else ""
 
-            pub_date = "取得不可"
-            if date_str:
-                ds = re.sub(r'\\([月火水木金土日]\\)', '', date_str).strip()
-                try:
-                    dt = datetime.strptime(ds, "%Y/%m/%d %H:%M")
-                    pub_date = dt.strftime("%Y/%m/%d %H:%M")
-                except ValueError:
-                    try:
-                        year = jst_now().year
-                        dt = datetime.strptime(f"{year}/{ds}", "%Y/%m/%d %H:%M")
-                        pub_date = dt.strftime("%Y/%m/%d %H:%M")
-                    except ValueError:
-                        pub_date = ds
+            pub_date = normalize_date_str(date_str) if date_str else "取得不可"
 
             source = ""
             for sel in [
@@ -369,6 +389,11 @@ def main():
     dfs_merged: dict[str, pd.DataFrame] = {}
     for kw in keywords:
         df_old = dfs_old.get(kw, pd.DataFrame(columns=["タイトル", "URL", "投稿日", "引用元", "取得日時", "検索キーワード", "ポジネガ", "カテゴリ", "重複確認用タイトル"]))
+        
+        # 既存データの投稿日を正規化
+        if not df_old.empty:
+            df_old['投稿日'] = df_old['投稿日'].astype(str).apply(normalize_date_str)
+
         df_new = scrape_yahoo(kw)
 
         # 既存データと新規データの重複確認用タイトルを再生成
